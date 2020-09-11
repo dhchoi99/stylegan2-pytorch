@@ -493,14 +493,16 @@ class Generator(nn.Module):
                     getattr(self.noises, f'noise_{i}') for i in range(self.num_layers)
                 ]
 
-        if truncation < 1:
-            style_t = []
+        if truncation_latent is None:
+            truncation_latent = self.mean_latent(4096)
 
+        #if truncation < 1:
+        if True:
+            style_t = []
             for style in styles:
                 style_t.append(
                     truncation_latent + truncation * (style - truncation_latent)
                 )
-
             styles = style_t
 
         if len(styles) < 2:
