@@ -71,114 +71,131 @@ def make_image(tensor):
 
 
 class Projector:
-    def __init__(self):
+    def __init__(self, path_ckpt):
         self.init_vars()
-        self.set_network()
+        self.path_ckpt = path_ckpt
+        self.set_model()
 
     def init_vars(self):
-        self.size = 512
-        self.lr_rampup = 0.05
-        self.lr_rampdown = 0.25
-        self.lr = 0.1
-        self.noise = 0.05
-        self.noise_ramp = 0.75
-        self.step = 1000
-        self.noise_regularize = 1e5
-        self.mse = 0
-        self.w_plus = True
-        self.n_mean_latent = 10000
-        self.device = 'cuda'
+        class Args:
+            pass
+        self.args = Args()
+        self.args.device = 'cuda'
+        self.args.size = 512
+        self.args.resize = min(self.args.size, 256)
+        self.args.steps = 1000
+        self.args.n_mean_latent = 10000
 
-        self.verbose = True
-        self.resize = min(self.size, 256)
+        self.args.lr_rampup = 0.05
+        self.args.lr_rampdown = 0.25
+        self.args.lr = 0.1
 
-    def _info(self, *args):
-        if self.verbose:
-            print('Projector:', *args)
+        self.args.noise = 0.05
+        self.args.noise_ramp = 0.75
+        self.args.noise_regularize = 1e5
 
-    def set_network(self):
-        path = '../stylegan2/checkpoint/2020-01-11-skylion-stylegan2-animeportraits-networksnapshot-024664.pt'
-        self.g_ema = Generator(self.size, 512, 8)
-        self.g_ema.load_state_dict(torch.load(path)['g_ema'], strict=False)
-        self.g_ema.eval()
-        self.g_ema.to(self.device)
+        self.args.mse = 0
+        self.args.w_plus = False
 
-        # Find dlatent stats.
-        self._info('Finding W midpoint and stddev using %d samples' % self.n_mean_latent)
-        with torch.no_grad():
-            noise_sample = torch.randn(self.n_mean_latent, self.size, device=self.device)
-            latent_out = self.g_ema.style(noise_sample)
+        self.transform = transforms.Compose([
+            transforms.Resize(self.args.resize),
+            transforms.CenterCrop(self.args.resize),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        ])
 
-            self.latent_mean = latent_out.mean(0)
-            self.latent_std = ((latent_out - self.latent_mean).pow(2).sum() / self.n_mean_latent) ** 0.5
+    def set_model(self):
+        self.g = Generator(self.args.size, 512, 8)
+        self.g.load_state_dict(torch.load(self.path_ckpt)['g_ema'], strict=False)
+        self.g.eval()
+        self.g = self.g.to(self.args.device)
 
         self.percept = lpips.PerceptualLoss(
-            model='net-lin', net='vgg', use_gpu=self.device.startswith('cuda')
+            model='net-lin', net='vgg', use_gpu=self.args.device.startswith('cuda')
         )
 
-        # Find noise inputs
-        self._info('Setting up noise inputs...')
-        noises_single = self.g_ema.make_noise()
-        self.noises = []
-        rep = 3
-        for noise in noises_single:
-            self.noises.append(noise.repeat(rep, 1, 1, 1).normal_())  # TODO
-        self.latent_in = self.latent_mean.detach().clone().unsqueeze(0).repeat(rep, 1)
+    def set_imgs(self, imgs):
+        if imgs is not None:
+            if isinstance(imgs, list):
+                print('got list of img files')
+                self.imgs = []
+                for imgfile in imgs:
+                    img = self.transform(Image.open(imgfile).convert('RGB'))
+                    self.imgs.append(img)
+                self.imgs = torch.stack(self.imgs, 0).to(self.args.device)
+            elif isinstance(imgs, torch.Tensor):
+                print('got tensor img files')
+                self.imgs = imgs.clone()
 
-        if self.w_plus:
-            self.latent_in = self.latent_in.unsqueeze(1).repeat(1, self.g_ema.n_latent, 1)
-        self.latent_in.requires_grad_(True)
-        for noise in self.noises:
+    def project(self, imgs, steps):
+        self.set_imgs(imgs)
+        self.args.steps = steps
+
+        with torch.no_grad():
+            noise_sample = torch.randn(self.args.n_mean_latent, 512, device=self.args.device)
+            latent_out = self.g.style(noise_sample)
+            latent_mean = latent_out.mean(0)
+            latent_std = ((latent_out - latent_mean).pow(2).sum() / self.args.n_mean_latent) ** 0.5
+
+        noises_single = self.g.make_noise()
+        noises = []
+        for noise in noises_single:
+            noises.append(noise.repeat(self.imgs.shape[0], 1, 1, 1).normal_())
+
+        latent_in = latent_mean.detach().clone().unsqueeze(0).repeat(self.imgs.shape[0], 1)
+        if self.args.w_plus:
+            latent_in = latent_in.unsqueeze(1).repeat(1, self.g.n_latent, 1)
+        latent_in.requires_grad_(True)
+
+        for noise in noises:
             noise.requires_grad_(True)
 
-        self.optimizer = optim.Adam([self.latent_in] + self.noises, lr=self.lr)
-
-    def optimize(self, imgs):
-        pbar = tqdm(range(self.step))
+        optimizer = optim.Adam([latent_in] + noises, lr=self.args.lr)
         latent_path = []
 
+        pbar = tqdm(range(self.args.steps))
         for i in pbar:
-            t = i / self.step
-            lr = get_lr(t, self.lr)
-            self.optimizer.param_groups[0]['lr'] = lr
-            noise_strength = self.latent_std * self.noise * max(0, 1 - t / self.noise_ramp) ** 2
-            latent_n = latent_noise(self.latent_in, noise_strength.item())
+            t = i / self.args.steps
+            lr = get_lr(t, self.args.lr)
+            optimizer.param_groups[0]['lr'] = lr
+            noise_strength = latent_std * self.args.noise * max(0, 1 - t / self.args.noise_ramp) ** 2
+            latent_n = latent_noise(latent_in, noise_strength.item())
 
-            img_gen, _ = self.g_ema([latent_n], input_is_latent=True, noise=self.noises)
-            B, C, H, W = img_gen.shape
+            img_gen, _ = self.g([latent_n], input_is_latent=True, noise=noises)
 
-            if H > 512:
-                factor = H // 512
+            batch, channel, height, width = img_gen.shape
+
+            if height > self.args.resize:
+                factor = height // self.args.resize
 
                 img_gen = img_gen.reshape(
-                    B, C, H // factor, W // factor, factor
+                    batch, channel, height // factor, factor, width // factor, factor
                 )
-                img_gen = img_gen.mean([3, 5])  # TODO what is this for?
+                img_gen = img_gen.mean([3, 5])
 
-            p_loss = self.percept(img_gen, imgs).sum()
-            n_loss = noise_regularize(self.noises)
-            mse_loss = F.mse_loss(img_gen, imgs)
+            p_loss = self.percept(img_gen, self.imgs).sum()
+            n_loss = noise_regularize(noises)
+            mse_loss = F.mse_loss(img_gen, self.imgs)
 
-            loss = p_loss + self.noise_regularize * n_loss + self.mse * mse_loss
+            loss = p_loss + self.args.noise_regularize * n_loss + self.args.mse * mse_loss
 
-            self.optimizer.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
-            self.optimizer.step()
+            optimizer.step()
 
-            noise_normalize_(self.noises)
+            noise_normalize_(noises)
 
             if (i + 1) % 100 == 0:
-                latent_path.append(self.latent_in.detach().clone())
+                latent_path.append(latent_in.detach().clone())
 
             pbar.set_description((
-                f"perceptual: {p_loss.item():.4f}; noise regularize: {n_loss.item():.8f};"
-                f" mse: {mse_loss.item():.4f}; lr: {lr:.4f}"
+                f"perceptual: {p_loss.item():.8f}; noise regularize: {n_loss.item():.8f}; mse: {mse_loss.item():.8f}; lr: {lr:.4f}"
             ))
 
-        img_gen, _ = self.g_ema([latent_path[-1]], input_is_latent=True, noise=self.noises)
-        img_ar = make_image(img_gen)
-
-        return (latent_path, self.noises), (img_gen, img_ar)
+        img_gen, _ = self.g([latent_path[-1]], input_is_latent=True, noise=noises)
+        # img_ar = make_image(img_gen)
+        # result_file = {}
+        return img_gen, latent_path, latent_in
 
 
 def project(path_ckpt, path_files, step=1000):
@@ -320,72 +337,6 @@ def project(path_ckpt, path_files, step=1000):
     print(filename)
 
     return img_gen, latent_path, latent_in
-
-
-class Projector2:
-    def __init__(self):
-        self.init_vars()
-
-    def init_vars(self):
-        self.num_steps                  = 1000
-        self.dlatent_avg_samples        = 10000
-        self.initial_learning_rate      = 0.1
-        self.initial_noise_factor       = 0.05
-        self.lr_rampdown_length         = 0.25
-        self.lr_rampup_length           = 0.05
-        self.noise_ramp_length          = 0.75
-        self.regularize_noise_weight    = 1e5
-        self.verbose                    = False
-        self.clone_net                  = True
-        self.device                     = 'cuda'
-
-        self._Gs                    = None
-        self._minibatch_size        = None
-        self._dlatent_avg           = None
-        self._dlatent_std           = None
-        self._noise_vars            = None
-        self._noise_init_op         = None
-        self._noise_normalize_op    = None
-        self._dlatents_var          = None
-        self._noise_in              = None
-        self._dlatents_expr         = None
-        self._images_expr           = None
-        self._target_images_var     = None
-        self._lpips                 = None
-        self._dist                  = None
-        self._loss                  = None
-        self._reg_sizes             = None
-        self._lrate_in              = None
-        self._opt                   = None
-        self._opt_step              = None
-        self._cur_step              = None
-
-    def _info(self, *args):
-        if self.verbose:
-            print('Projector:', *args)
-
-    def set_network(self, torch_Gs, minibatch_size=1):
-        assert minibatch_size == 1
-        self.torch_Gs = Generator(512, 512, 8)
-        self.torch_Gs.load_state_dict(torch_Gs.state_dict())
-        self.torch_Gs.to(self.device)
-        self._minibatch_size = minibatch_size
-
-        # Find dlatent stats
-        self._info('Finding W midpoint and stddev using %d samples...' % self.dlatent_avg_samples)
-        latent_samples = torch.randn(self.dlatent_avg_samples, 512, device=self.device)
-        dlatent_samples = self.torch_Gs.style(latent_samples)
-        self._dlatent_avg = dlatent_samples.mean(0)
-        self._dlatent_std = ((dlatent_samples-self._dlatent_avg).pow(2).sum() / self.dlatent_avg_samples) ** 0.5
-        self._info('std = %g' % self._dlatent_std)
-
-        # Find noise inputs.
-        self._info('Setting up noise inputs...')
-        #self._noise_vars = []
-        self._noise_vars = self.torch_Gs.make_noise()
-        noise_init_ops = []
-        noise_normalize_ops = []
-
 
 
 if __name__ == "__main__":
