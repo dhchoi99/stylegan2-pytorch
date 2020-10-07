@@ -71,15 +71,17 @@ def make_image(tensor):
 
 
 class Projector:
-    def __init__(self, path_ckpt):
-        self.init_vars()
-        self.path_ckpt = path_ckpt
-        self.set_model()
+    def __init__(self, args):
+        self.args = args
 
+        self.init_vars()
+
+        self.percept = lpips.PerceptualLoss(
+            model='net-lin', net='vgg', use_gpu=self.args.device.startswith('cuda')
+        )
+
+    # TODO
     def init_vars(self):
-        class Args:
-            pass
-        self.args = Args()
         self.args.device = 'cuda'
         self.args.size = 512
         self.args.resize = min(self.args.size, 256)
@@ -104,47 +106,35 @@ class Projector:
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ])
 
-    def set_model(self):
-        self.g = Generator(self.args.size, 512, 8)
-        self.g.load_state_dict(torch.load(self.path_ckpt)['g_ema'], strict=False)
-        self.g.eval()
-        self.g = self.g.to(self.args.device)
+    def read_img(self, img):
+        if img is not None:
+            if isinstance(img, str):
+                img = self.transform(Image.open(img).convert('RGB'))
+            # elif isinstance(img, PIL.Image):
+            #     img = self.transform(img)
+            elif isinstance(img, torch.Tensor):
+                pass
+        return img
 
-        self.percept = lpips.PerceptualLoss(
-            model='net-lin', net='vgg', use_gpu=self.args.device.startswith('cuda')
-        )
 
-    def set_imgs(self, imgs):
-        if imgs is not None:
-            if isinstance(imgs, list):
-                print('got list of img files')
-                self.imgs = []
-                for imgfile in imgs:
-                    img = self.transform(Image.open(imgfile).convert('RGB'))
-                    self.imgs.append(img)
-                self.imgs = torch.stack(self.imgs, 0).to(self.args.device)
-            elif isinstance(imgs, torch.Tensor):
-                print('got tensor img files')
-                self.imgs = imgs.clone()
-
-    def project(self, imgs, steps):
-        self.set_imgs(imgs)
-        self.args.steps = steps
+    def project(self, generator, img, steps=1000):
+        img = self.read_img(img)
+        img = img.to(self.args.device)
 
         with torch.no_grad():
             noise_sample = torch.randn(self.args.n_mean_latent, 512, device=self.args.device)
-            latent_out = self.g.style(noise_sample)
+            latent_out = generator.style(noise_sample)
             latent_mean = latent_out.mean(0)
             latent_std = ((latent_out - latent_mean).pow(2).sum() / self.args.n_mean_latent) ** 0.5
 
-        noises_single = self.g.make_noise()
+        noises_single = generator.make_noise()
         noises = []
         for noise in noises_single:
-            noises.append(noise.repeat(self.imgs.shape[0], 1, 1, 1).normal_())
+            noises.append(noise.normal_())
 
-        latent_in = latent_mean.detach().clone().unsqueeze(0).repeat(self.imgs.shape[0], 1)
+        latent_in = latent_mean.clone().detach().unsqueeze(0)
         if self.args.w_plus:
-            latent_in = latent_in.unsqueeze(1).repeat(1, self.g.n_latent, 1)
+            latent_in = latent_in.unsqueeze(1).repeat(1, generator.n_latent, 1)
         latent_in.requires_grad_(True)
 
         for noise in noises:
@@ -153,29 +143,28 @@ class Projector:
         optimizer = optim.Adam([latent_in] + noises, lr=self.args.lr)
         latent_path = []
 
-        pbar = tqdm(range(self.args.steps))
+        pbar = tqdm(range(steps))
+
         for i in pbar:
-            t = i / self.args.steps
+            t = i / steps
             lr = get_lr(t, self.args.lr)
+
             optimizer.param_groups[0]['lr'] = lr
-            noise_strength = latent_std * self.args.noise * max(0, 1 - t / self.args.noise_ramp) ** 2
+            noise_strength = latent_std * self.args.noise * max(0, 1-t/self.args.noise_ramp)**2
             latent_n = latent_noise(latent_in, noise_strength.item())
 
-            img_gen, _ = self.g([latent_n], input_is_latent=True, noise=noises)
+            img_gen, _ = generator([latent_n], input_is_latent=True, noise=noises)
 
-            batch, channel, height, width = img_gen.shape
+            B, C, H, W = img_gen.shape
+            if H > self.args.resize:
+                factor = H // self.args.resize
 
-            if height > self.args.resize:
-                factor = height // self.args.resize
-
-                img_gen = img_gen.reshape(
-                    batch, channel, height // factor, factor, width // factor, factor
-                )
+                img_gen = img_gen.reshape(B, C, H // factor, factor, W // factor, factor)
                 img_gen = img_gen.mean([3, 5])
 
-            p_loss = self.percept(img_gen, self.imgs).sum()
+            p_loss = self.percept(img_gen, img).sum()
             n_loss = noise_regularize(noises)
-            mse_loss = F.mse_loss(img_gen, self.imgs)
+            mse_loss = F.mse_loss(img_gen, img)
 
             loss = p_loss + self.args.noise_regularize * n_loss + self.args.mse * mse_loss
 
@@ -186,15 +175,13 @@ class Projector:
             noise_normalize_(noises)
 
             if (i + 1) % 100 == 0:
-                latent_path.append(latent_in.detach().clone())
+                latent_path.append(latent_in.clone().detach())
 
             pbar.set_description((
                 f"perceptual: {p_loss.item():.8f}; noise regularize: {n_loss.item():.8f}; mse: {mse_loss.item():.8f}; lr: {lr:.4f}"
             ))
 
-        img_gen, _ = self.g([latent_path[-1]], input_is_latent=True, noise=noises)
-        # img_ar = make_image(img_gen)
-        # result_file = {}
+        img_gen, _ = generator(latent_path[-1], input_is_latent=True, noise=noises)
         return img_gen, latent_path, latent_in
 
 
