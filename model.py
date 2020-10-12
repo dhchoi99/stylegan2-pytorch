@@ -494,7 +494,6 @@ class Generator(nn.Module):
         if truncation_latent is None:
             truncation_latent = self.mean_latent(4096)
 
-        print('start handling')
         if input_is=='noise':
             style_t = []
             for style in styles:
@@ -504,7 +503,6 @@ class Generator(nn.Module):
                 assert style.ndim == 1
 
                 style = self.style(style.unsqueeze(0))
-                print('style', style.shape)
                 style_t.append(style)
             styles = style_t
             input_is = 'latent'
