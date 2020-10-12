@@ -65,7 +65,7 @@ def compare_axes():
             scale = scales[j]
             # TODO 이거 이렇게 안 넣고 batch로 g에 넣어주면 되지 않나?
             img, _ = g([latent + scale * direction], truncation=truncation, truncation_latent=trunc,
-                       input_is_latent=True, randomize_noise=False)
+                       input_is_='latent', randomize_noise=False)
             img = F.interpolate(img, (imsize, imsize))
             imgs[:, i * imsize:(i + 1) * imsize, j * imsize:(j + 1) * imsize] = img[0]
 
@@ -101,7 +101,7 @@ def main():
     scales = torch.linspace(-1, 1, 2 * args.m + 1)
     for scale in scales:
         img, _ = g([latent + scale * direction], truncation=args.truncation, truncation_latent=trunc,
-                   input_is_latent=True, )
+                   input_is='latent', )
         imgs.append(img)
     imgs = torch.cat(imgs, 0)
 

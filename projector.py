@@ -153,7 +153,7 @@ class Projector:
             noise_strength = latent_std * self.args.noise * max(0, 1-t/self.args.noise_ramp)**2
             latent_n = latent_noise(latent_in, noise_strength.item())
 
-            img_gen, _ = generator([latent_n], input_is_latent=True, noise=noises)
+            img_gen, _ = generator([latent_n], input_is='latent', noise=noises)
 
             B, C, H, W = img_gen.shape
             if H > self.args.resize:
@@ -181,7 +181,7 @@ class Projector:
                 f"perceptual: {p_loss.item():.8f}; noise regularize: {n_loss.item():.8f}; mse: {mse_loss.item():.8f}; lr: {lr:.4f}"
             ))
 
-        img_gen, _ = generator(latent_path[-1], input_is_latent=True, noise=noises)
+        img_gen, _ = generator(latent_path[-1], input_is='latent', noise=noises)
         return img_gen, latent_path, latent_in
 
 
@@ -267,7 +267,7 @@ def project(path_ckpt, path_files, step=1000):
         noise_strength = latent_std * args.noise * max(0, 1 - t / args.noise_ramp) ** 2
         latent_n = latent_noise(latent_in, noise_strength.item())
 
-        img_gen, _ = g_ema([latent_n], input_is_latent=True, noise=noises)
+        img_gen, _ = g_ema([latent_n], input_is='latent', noise=noises)
 
         batch, channel, height, width = img_gen.shape
 
@@ -298,7 +298,7 @@ def project(path_ckpt, path_files, step=1000):
             f"perceptual: {p_loss.item():.8f}; noise regularize: {n_loss.item():.8f}; mse: {mse_loss.item():.8f}; lr: {lr:.4f}"
         ))
 
-    img_gen, _ = g_ema([latent_path[-1]], input_is_latent=True, noise=noises)
+    img_gen, _ = g_ema([latent_path[-1]], input_is='latent', noise=noises)
 
     filename = os.path.splitext(os.path.basename(args.files[0]))[0] + ".pt"
 

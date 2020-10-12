@@ -474,16 +474,14 @@ class Generator(nn.Module):
     def forward(
         self,
         styles,
+        input_is,
         return_latents=False,
         inject_index=None,
         truncation=1,
         truncation_latent=None,
-        input_is_latent=False,
         noise=None,
         randomize_noise=True,
     ):
-        if not input_is_latent:
-            styles = [self.style(s) for s in styles]
 
         if noise is None:
             if randomize_noise:
@@ -496,32 +494,74 @@ class Generator(nn.Module):
         if truncation_latent is None:
             truncation_latent = self.mean_latent(4096)
 
-        #if truncation < 1:
-        if True:
+        print('start handling')
+        if input_is=='noise':
             style_t = []
             for style in styles:
-                style_t.append(
-                    truncation_latent + truncation * (style - truncation_latent)
-                )
+                assert isinstance(style, torch.Tensor)
+
+                style = style.squeeze()
+                assert style.ndim == 1
+
+                style = self.style(style.unsqueeze(0))
+                print('style', style.shape)
+                style_t.append(style)
+            styles = style_t
+            input_is = 'latent'
+
+        if input_is == 'latent':
+            style_t = []
+            for style in styles:
+                assert isinstance(style, torch.Tensor)
+
+                style = style.squeeze().unsqueeze(0)
+                assert style.ndim == 2
+
+                style = truncation_latent + truncation * (style - truncation_latent)
+                style_t.append(style)
+
             styles = style_t
 
-        if len(styles) < 2:
-            inject_index = self.n_latent
-
-            if styles[0].ndim < 3:
+            if len(styles) < 2:
+                inject_index = self.n_latent
                 latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-
             else:
-                latent = styles[0]
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
 
-        else:
-            if inject_index is None:
-                inject_index = random.randint(1, self.n_latent - 1)
+                latent1 = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+                latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
 
-            latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
-            latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
+                latent = torch.cat([latent1, latent2], 1)
 
-            latent = torch.cat([latent, latent2], 1)
+        if input_is == 'latent+':
+            if len(styles) < 2:
+                latent = styles[0].unsqueeze(0)
+            else:
+                if inject_index is None:
+                    inject_index = random.randint(1, self.n_latent - 1)
+                latent1 = styles[0][:inject_index].unsqueeze(0)
+                latent2 = styles[1][inject_index:].unsqueeze(0)
+
+                latent = torch.cat([latent1, latent2], 1)
+
+        # if len(styles) < 2:
+        #     inject_index = self.n_latent
+        #
+        #     if styles[0].ndim < 3:
+        #         latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+        #
+        #     else:
+        #         latent = styles[0]
+        #
+        # else:
+        #     if inject_index is None:
+        #         inject_index = random.randint(1, self.n_latent - 1)
+        #
+        #     latent = styles[0].unsqueeze(1).repeat(1, inject_index, 1)
+        #     latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
+        #
+        #     latent = torch.cat([latent, latent2], 1)
 
         out = self.input(latent)
         out = self.conv1(out, latent[:, 0], noise=noise[0])

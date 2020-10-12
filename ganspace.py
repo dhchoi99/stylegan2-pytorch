@@ -59,7 +59,7 @@ def main():
             scale = scales[j] * 1
             # TODO 이거 이렇게 안 넣고 batch로 g에 넣어주면 되지 않나?
             img, _ = g([latent + scale * direction], truncation=truncation, truncation_latent=trunc,
-                       input_is_latent=True, randomize_noise=False)
+                       input_is='latent', randomize_noise=False)
             img = F.interpolate(img, (imsize, imsize))
             imgs[:, i * imsize:(i + 1) * imsize, j * imsize:(j + 1) * imsize] = img[0]
 
